@@ -1,112 +1,116 @@
 #!/usr/bin/env python
+import math
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-import argparse
-import importlib
-import random
-import os
-from FLAlgorithms.servers.serveravg import FedAvg
-from FLAlgorithms.servers.serverpFedMe import pFedMe
-from FLAlgorithms.servers.serverperavg import PerAvg
-from FLAlgorithms.trainmodel.models import *
 from utils.plot_utils import *
+from oco_model import node
 import torch
+
 torch.manual_seed(0)
+# TODO:
+num_samples = 224
+num_features = 14
+num_nodes = 30
+time_horizon = 300
+ER_prob = 0.2
+weight = 1 / (1 + num_nodes)
+radius = 5
 
-def main(dataset, algorithm, model, batch_size, learning_rate, beta, lamda, num_glob_iters,
-        local_epochs, optimizer, numusers, K, personal_learning_rate, times, gpu):
 
-    # Get device status: Check GPU or CPU
-    device = torch.device("cuda:{}".format(gpu) if torch.cuda.is_available() and gpu != -1 else "cpu")
+def data_generation(num_samples, num_features):
+    coeff = np.random.rand(num_features, 1)
+    X = np.random.rand(num_samples, num_features)
+    noise = np.random.rand(num_samples, 1)
+    y = X @ coeff + noise
+    return X, y
 
-    for i in range(times):
-        print("---------------Running time:------------",i)
-        # Generate model
-        if(model == "mclr"):
-            if(dataset == "Mnist"):
-                model = Mclr_Logistic().to(device), model
-            else:
-                model = Mclr_Logistic(60,10).to(device), model
-                
-        if(model == "cnn"):
-            if(dataset == "Mnist"):
-                model = Net().to(device), model
-            elif(dataset == "Cifar10"):
-                model = CNNCifar(10).to(device), model
-            
-        if(model == "dnn"):
-            if(dataset == "Mnist"):
-                model = DNN().to(device), model
-            else: 
-                model = DNN(60,20,10).to(device), model
 
-        # select algorithm
-        if(algorithm == "FedAvg"):
-            server = FedAvg(device, dataset, algorithm, model, batch_size, learning_rate, beta, lamda, num_glob_iters, local_epochs, optimizer, numusers, i)
-        
-        if(algorithm == "pFedMe"):
-            server = pFedMe(device, dataset, algorithm, model, batch_size, learning_rate, beta, lamda, num_glob_iters, local_epochs, optimizer, numusers, K, personal_learning_rate, i)
+def index_scheduler():
+    return np.random.randint(0, num_samples, (time_horizon, num_nodes))
 
-        if(algorithm == "PerAvg"):
-            server = PerAvg(device, dataset, algorithm, model, batch_size, learning_rate, beta, lamda, num_glob_iters, local_epochs, optimizer, numusers, i)
 
-        server.train()
-        server.test()
+def dataset_iter(dataset):
+    rand_index = np.random.randint(0, num_samples, (1, 1))[0]
+    return dataset[0][:][rand_index][0], dataset[1][rand_index][0]
 
-    # Average data 
-    if(algorithm == "PerAvg"):
-        algorithm == "PerAvg_p"
-    if(algorithm == "pFedMe"):
-        average_data(num_users=numusers, loc_ep1=local_epochs, Numb_Glob_Iters=num_glob_iters, lamb=lamda,learning_rate=learning_rate, beta = beta, algorithms="pFedMe_p", batch_size=batch_size, dataset=dataset, k = K, personal_learning_rate = personal_learning_rate,times = times)
-    average_data(num_users=numusers, loc_ep1=local_epochs, Numb_Glob_Iters=num_glob_iters, lamb=lamda,learning_rate=learning_rate, beta = beta, algorithms=algorithm, batch_size=batch_size, dataset=dataset, k = K, personal_learning_rate = personal_learning_rate,times = times)
+
+def find_optimal_solution(dataset, index):
+    A = dataset[0][:][index]
+    b = dataset[1][index]
+    opt_sol = np.linalg.inv(A.T @ A) @ A.T @ b
+    return opt_sol
+
+
+def projection(lin_comb, radius):
+    return (radius * lin_comb) / np.linalg.norm(lin_comb, ord=2)
+
+
+def get_regret(decision, optimal_decision, schedule):
+    all_regret = []
+    for t in range(time_horizon):
+        reg = 0
+        for i in range(num_nodes):
+            index = schedule[t][i]
+            a = np.zeros((num_features, 1))
+            for i in range(num_features):
+                a[i] = dataset[0][index][i]
+            b = dataset[1][index]
+            reg += np.linalg.norm(a.T @ decision[t][i] - b) ** 2 - np.linalg.norm(a.T @ optimal_decision[i] - b) ** 2
+        all_regret.append(reg)
+            # print(np.linalg.norm(a.T @ decision[t][i] - b) ** 2 - np.linalg.norm(a.T @ optimal_decision[i] - b) ** 2)
+    return all_regret
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="Cifar10", choices=["Mnist", "Synthetic", "Cifar10"])
-    parser.add_argument("--model", type=str, default="cnn", choices=["dnn", "mclr", "cnn"])
-    parser.add_argument("--batch_size", type=int, default=20)
-    parser.add_argument("--learning_rate", type=float, default=0.005, help="Local learning rate")
-    parser.add_argument("--beta", type=float, default=1.0, help="Average moving parameter for pFedMe, or Second learning rate of Per-FedAvg")
-    parser.add_argument("--lamda", type=int, default=15, help="Regularization term")
-    parser.add_argument("--num_global_iters", type=int, default=800)
-    parser.add_argument("--local_epochs", type=int, default=20)
-    parser.add_argument("--optimizer", type=str, default="SGD")
-    parser.add_argument("--algorithm", type=str, default="pFedMe",choices=["pFedMe", "PerAvg", "FedAvg"]) 
-    parser.add_argument("--numusers", type=int, default=20, help="Number of Users per round")
-    parser.add_argument("--K", type=int, default=5, help="Computation steps")
-    parser.add_argument("--personal_learning_rate", type=float, default=0.09, help="Persionalized learning rate to caculate theta aproximately using K steps")
-    parser.add_argument("--times", type=int, default=5, help="running time")
-    parser.add_argument("--gpu", type=int, default=0, help="Which GPU to run the experiments, -1 mean CPU, 0,1,2 for GPU")
-    args = parser.parse_args()
+    dataset = data_generation(224, 14)
+    schedule = index_scheduler()
+    optimal_solution = []
+    for i in range(num_nodes):
+        optimal_solution.append(find_optimal_solution(dataset, schedule[:][i]))
+    # print(len(optimal_solution), optimal_solution[0].shape)
 
-    print("=" * 80)
-    print("Summary of training process:")
-    print("Algorithm: {}".format(args.algorithm))
-    print("Batch size: {}".format(args.batch_size))
-    print("Learing rate       : {}".format(args.learning_rate))
-    print("Average Moving       : {}".format(args.beta))
-    print("Subset of users      : {}".format(args.numusers))
-    print("Number of global rounds       : {}".format(args.num_global_iters))
-    print("Number of local rounds       : {}".format(args.local_epochs))
-    print("Dataset       : {}".format(args.dataset))
-    print("Local Model       : {}".format(args.model))
-    print("=" * 80)
+    graph = node.Graph(num_nodes)
+    decision = [[np.zeros((num_features, 1))] * num_nodes] * time_horizon
+    # decision = np.zeros((time_horizon, num_nodes, num_features))
+    half_step = [[np.zeros((num_features, 1))] * num_nodes] * time_horizon
+    # print(decision)
+    print(len(decision))
+    # t=T-1
+    for t in range(time_horizon - 1):
+        graph.generate(ER_prob)
+        # max_neighbour = max([graph.neighbour(index_agent)[0] for index_agent in range(num_nodes)])
+        for i in range(num_nodes):
+            num_neighbour, neighbours = graph.neighbour(i)
+            index = schedule[t][i]
+            # print(dataset)
+            # print("dataset[0]：", type(dataset), type(dataset[0]), dataset[0].shape)
+            a = np.zeros((num_features, 1))
+            for i in range(num_features):
+                a[i] = dataset[0][index][i]
+            # a = dataset[0][index, :]
+            b = dataset[1][index]
+            # print("a:", type(a), a.shape)
+            # print("b:", b)
+            # print("decision [t][i]: ", decision[t][i])
+            # print(decision[t][i] - 2 * a @ (a.T @ decision[t][i] - b))
+            # print(decision[t][i])
+            half_step[t][i] = decision[t][i] - 2 * (1 / math.sqrt(t + 1)) * (a @ (a.T @ decision[t][i] - b))
+            lin_comb = (1 - weight * num_neighbour) * half_step[t][i]
+            for neighbour in neighbours:
+                lin_comb += weight * half_step[t][neighbour]
+            decision[t + 1][i] = projection(lin_comb, radius)
 
-    main(
-        dataset=args.dataset,
-        algorithm = args.algorithm,
-        model=args.model,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        beta = args.beta, 
-        lamda = args.lamda,
-        num_glob_iters=args.num_global_iters,
-        local_epochs=args.local_epochs,
-        optimizer= args.optimizer,
-        numusers = args.numusers,
-        K=args.K,
-        personal_learning_rate=args.personal_learning_rate,
-        times = args.times,
-        gpu=args.gpu
-        )
+    regret = get_regret(decision, optimal_solution, schedule)
+    avg_regret = []
+    for i in range(len(regret)):
+    #     if i % 20
+        avg_regret.append(regret[i] / (i + 1))
+
+    print("avg_regret:",avg_regret)
+    plt.plot(avg_regret)
+    plt.xlabel("time_horizon(T)")
+    plt.ylabel("S_Regret")
+    plt.yscale("log")
+    plt.show()
+
+    # print("half_step[t][i]:", half_step[t][i])
